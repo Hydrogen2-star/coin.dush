@@ -1,0 +1,399 @@
+
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>COIN DASH</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#090d18;color:#edf4ff;font-family:system-ui,sans-serif;text-align:center}
+header{padding:18px 8px 8px}
+h1{margin:0;color:#60eaff;letter-spacing:4px;font-size:clamp(25px,6vw,38px)}
+.sub{color:#8393ae;font-size:12px;letter-spacing:2px}
+.stats{display:flex;justify-content:center;gap:clamp(12px,5vw,36px);margin:14px auto}
+.stat{min-width:72px}
+.stat small{display:block;color:#8496b5;font-size:12px}
+.stat strong{font-size:24px;font-variant-numeric:tabular-nums}
+#timer{color:#60eaff}
+main{width:min(92vw,540px);margin:auto}
+#wrap{position:relative;width:100%;aspect-ratio:1;border:2px solid #263b59;border-radius:10px;overflow:hidden;background:#101a2b;box-shadow:0 0 28px #143f6330}
+canvas{display:block;width:100%;height:100%;touch-action:manipulation}
+#overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;background:#07101ad9;padding:18px}
+#overlay.hidden{display:none}
+#big{font-size:clamp(65px,19vw,112px);font-weight:900;line-height:1;text-shadow:0 0 25px currentColor}
+#message{font-size:19px;font-weight:800;margin:16px 0 8px}
+#detail{font-size:13px;color:#a4b6d1;line-height:1.8;white-space:pre-line}
+button{cursor:pointer;color:#effaff;background:#142a42;border:1px solid #365575;border-radius:9px;padding:12px 16px;font-weight:750;font-size:14px}
+button:active{transform:scale(.97)}
+.primary{background:#087f9e;border-color:#37dfff;margin-top:20px;min-width:170px}
+.controls{display:flex;justify-content:center;flex-wrap:wrap;gap:8px;margin:13px 0}
+#hint{font-size:12px;color:#91a3be;line-height:1.8;margin:12px 0 22px}
+.selected{border-color:#60eaff;background:#07516a;box-shadow:0 0 10px #60eaff55}
+#toast{color:#60eaff;font-size:12px;min-height:18px}
+@media(max-width:400px){.stats{gap:12px}.stat strong{font-size:21px}button{padding:10px 12px}}
+</style>
+</head>
+<body>
+<header>
+<h1>COIN DASH</h1>
+<div class="sub">DODGE · REDIRECT · SURVIVE</div>
+</header>
+<div class="stats">
+<div class="stat"><small>SCORE</small><strong id="score">0</strong></div>
+<div class="stat"><small>TIME</small><strong id="timer">20.0</strong></div>
+<div class="stat"><small>MISSILES</small><strong id="missileCount">0</strong></div>
+</div>
+<main>
+<div id="wrap">
+<canvas id="game" width="600" height="600"></canvas>
+<div id="overlay">
+<div id="big" style="color:#60eaff">COIN DASH</div>
+<div id="message">コインを集めて生き残れ！</div>
+<div id="detail">方向マスを動かして進路を変えよう。
+ミサイルに当たるとゲームオーバー。</div>
+<button id="start" class="primary">ゲームスタート</button>
+</div>
+</div>
+<div class="controls" id="tileButtons">
+<button data-dir="0">↑ 上</button>
+<button data-dir="1">→ 右</button>
+<button data-dir="2">↓ 下</button>
+<button data-dir="3">← 左</button>
+</div>
+<div id="toast">方向マスを選び、移動先のマスをタップ！</div>
+<div class="controls">
+<button id="sound">🔊 音 ON</button>
+<button id="restart">↻ やり直す</button>
+</div>
+<div id="hint">
+PC：方向マスを選択 → 空きマスをクリック。矢印キーでも移動。<br>
+スマホ：方向マスを選択 → 空きマスをタップ。<br>
+キャラクターは自動で直進。壁に当たると停止します。
+</div>
+</main>
+<script>
+(()=>{
+const N=6, SIZE=600, CELL=100;
+const canvas=document.querySelector('#game');
+const ctx=canvas.getContext('2d');
+const $=id=>document.getElementById(id);
+const dirs=[{x:0,y:-1,icon:'↑',name:'上'},
+{x:1,y:0,icon:'→',name:'右'},
+{x:0,y:1,icon:'↓',name:'下'},
+{x:-1,y:0,icon:'←',name:'左'}];
+
+let player,tiles,coin,missiles,score,timeLeft,timeLimit;
+let running=false,ended=false,selected=0;
+let lastTick=0,elapsed=0,lastFrame=0,spawnElapsed=0;
+let warningSeen=new Set(),flash=0,explosion=null;
+let audioOn=true,audioCtx=null,raf=0;
+
+function rand(n){return Math.floor(Math.random()*n)}
+function same(a,b){return a.x===b.x&&a.y===b.y}
+function inside(p){return p.x>=0&&p.x<N&&p.y>=0&&p.y<N}
+function occupied(p,ignoreTile=-1){
+ if(player&&same(player,p))return true;
+ if(coin&&same(coin,p))return true;
+ if(tiles&&tiles.some((t,i)=>i!==ignoreTile&&same(t,p)))return true;
+ return false;
+}
+function emptyCell(ignoreCoin=false){
+ const free=[];
+ for(let y=0;y<N;y++)for(let x=0;x<N;x++){
+  const p={x,y};
+  if(player&&same(player,p))continue;
+  if(tiles&&tiles.some(t=>same(t,p)))continue;
+  if(!ignoreCoin&&coin&&same(coin,p))continue;
+  free.push(p);
+ }
+ return free.length?free[rand(free.length)]:null;
+}
+function newCoin(){coin=emptyCell(true)}
+function reset(){
+ running=false;ended=false;score=0;timeLimit=20;timeLeft=20;
+ missiles=[];warningSeen=new Set();flash=0;explosion=null;
+ selected=0;elapsed=0;spawnElapsed=0;lastTick=0;
+ player={x:2,y:2,dir:1,stopped:false};
+ tiles=[
+  {x:1,y:1,dir:0},{x:4,y:1,dir:1},
+  {x:4,y:4,dir:2},{x:1,y:4,dir:3}
+ ];
+ coin=null;newCoin();updateUI();draw();
+ $('overlay').classList.remove('hidden');
+ $('big').textContent='COIN DASH';
+ $('big').style.color='#60eaff';
+ $('message').textContent='コインを集めて生き残れ！';
+ $('detail').textContent='方向マスを動かして進路を変えよう。\nミサイルに当たるとゲームオーバー。';
+ $('start').textContent='ゲームスタート';
+}
+function updateUI(){
+ $('score').textContent=score;
+ $('timer').textContent=Math.max(0,timeLeft).toFixed(1);
+ $('timer').style.color=timeLeft<=3?'#ff415c':timeLeft<=5?'#ff6679':timeLeft<=10?'#60aaff':'#60eaff';
+ $('missileCount').textContent=missiles.length;
+ document.querySelectorAll('[data-dir]').forEach(b=>
+  b.classList.toggle('selected',Number(b.dataset.dir)===selected));
+ $('sound').textContent=audioOn?'🔊 音 ON':'🔇 音 OFF';
+}
+function tone(freq,duration=.12,type='sine',volume=.07,delay=0){
+ if(!audioOn)return;
+ try{
+  audioCtx ||= new (window.AudioContext||window.webkitAudioContext)();
+  if(audioCtx.state==='suspended')audioCtx.resume();
+  const o=audioCtx.createOscillator(),g=audioCtx.createGain();
+  o.type=type;o.frequency.setValueAtTime(freq,audioCtx.currentTime+delay);
+  g.gain.setValueAtTime(volume,audioCtx.currentTime+delay);
+  g.gain.exponentialRampToValueAtTime(.001,audioCtx.currentTime+delay+duration);
+  o.connect(g);g.connect(audioCtx.destination);
+  o.start(audioCtx.currentTime+delay);o.stop(audioCtx.currentTime+delay+duration);
+ }catch(e){}
+}
+function warningSound(n){
+ const f={10:440,5:520,4:620,3:700,2:820,1:980}[n];
+ tone(f,.17,n<=3?'sawtooth':'triangle',n<=3?.10:.055);
+ if(n<=3)tone(f*1.25,.13,'square',.035,.13);
+}
+function boom(){
+ if(!audioOn)return;
+ tone(100,.45,'sawtooth',.17);
+ tone(55,.55,'triangle',.16,.05);
+}
+function showOverlay(big,msg,detail,button='もう一度プレイ'){
+ $('overlay').classList.remove('hidden');
+ $('big').textContent=big;
+ $('big').style.color='#ff415c';
+ $('message').textContent=msg;
+ $('detail').textContent=detail;
+ $('start').textContent=button;
+}
+function start(){
+ if(running)return;
+ if(ended)reset();
+ running=true;ended=false;
+ $('overlay').classList.add('hidden');
+ lastFrame=performance.now();lastTick=0;elapsed=0;spawnElapsed=0;
+ if(raf)cancelAnimationFrame(raf);
+ raf=requestAnimationFrame(loop);
+}
+function gameOver(reason){
+ if(!running)return;
+ running=false;ended=true;
+ if(reason==='missile'){
+  explosion={x:player.x,y:player.y,age:0};
+  flash=0.35;boom();
+  draw();
+  setTimeout(()=>{
+   showOverlay('BOOM!','ゲームオーバー',
+    'スコア：'+score+' コイン\n方向マスの位置とミサイルの軌道を見直そう。');
+  },380);
+ }else{
+  showOverlay('TIME UP','時間切れ！','スコア：'+score+' コイン');
+ }
+ updateUI();
+}
+function moveTile(index,p){
+ if(!running)return;
+ if(!inside(p)||occupied(p,index)){
+  $('toast').textContent='そこには移動できません';
+  return;
+ }
+ tiles[index].x=p.x;tiles[index].y=p.y;
+ selected=index;updateUI();draw();
+ $('toast').textContent=dirs[tiles[index].dir].name+'方向のマスを移動しました';
+}
+function repositionTileByKey(dx,dy){
+ const t=tiles[selected],p={x:t.x+dx,y:t.y+dy};
+ moveTile(selected,p);
+}
+function step(){
+ if(!running)return;
+ // Move the character one cell in its current direction.
+ if(!player.stopped){
+  const d=dirs[player.dir],next={x:player.x+d.x,y:player.y+d.y};
+  if(!inside(next)){
+   player.stopped=true;
+  }else{
+   player.x=next.x;player.y=next.y;
+   const tile=tiles.find(t=>same(t,player));
+   if(tile)player.dir=tile.dir;
+   if(coin&&same(player,coin)){
+    score++;
+    timeLimit=Math.max(3,20-score*.5);
+    timeLeft=timeLimit;
+    warningSeen=new Set();
+    tone(880,.09,'sine',.08);tone(1175,.12,'sine',.06,.08);
+    newCoin();
+    $('toast').textContent='コイン獲得！ 次の制限時間 '+timeLimit.toFixed(1)+' 秒';
+    // Difficulty rises gradually with score.
+    spawnElapsed=0;
+   }
+  }
+ }
+ // Missiles travel one cell per step.
+ for(const m of missiles){
+  m.x+=m.dx;m.y+=m.dy;
+ }
+ missiles=missiles.filter(m=>inside(m));
+ if(missiles.some(m=>same(m,player))){
+  gameOver('missile');return;
+ }
+ // Spawn more frequently as the score increases.
+ spawnElapsed+=.25;
+ const interval=Math.max(.7,2.8-score*.12);
+ if(spawnElapsed>=interval){
+  spawnElapsed=0;spawnMissile();
+ }
+ updateUI();draw();
+}
+function spawnMissile(){
+ const horizontal=Math.random()<.5;
+ let m;
+ if(horizontal){
+  const y=rand(N),fromLeft=Math.random()<.5;
+  m={x:fromLeft?-1:N,y,dx:fromLeft?1:-1,dy:0};
+ }else{
+  const x=rand(N),fromTop=Math.random()<.5;
+  m={x,y:fromTop?-1:N,dx:0,dy:fromTop?1:-1};
+ }
+ missiles.push(m);
+ // Brief warning line before the missile reaches the board.
+ tone(250,.06,'square',.025);
+}
+function countdown(){
+ const n=Math.ceil(timeLeft);
+ if([10,5,4,3,2,1].includes(n)&&!warningSeen.has(n)&&timeLeft<=n){
+  warningSeen.add(n);
+  flash=.38;warningSound(n);
+  $('big').textContent=String(n);
+  $('big').style.color=n<=3?'#ff334f':'#4aaaff';
+  $('message').textContent=n<=3?'急げ！':n<=5?'時間がない！':'残り時間に注意！';
+  $('detail').textContent='';
+  $('overlay').classList.remove('hidden');
+  setTimeout(()=>{
+   if(running)$('overlay').classList.add('hidden');
+  },420);
+ }
+}
+function loop(now){
+ if(!running)return;
+ const dt=Math.min((now-lastFrame)/1000,.1);
+ lastFrame=now;elapsed+=dt;timeLeft-=dt;
+ if(timeLeft<=0){timeLeft=0;updateUI();gameOver('time');draw();return;}
+ countdown();
+ // Fixed movement rate, independent of frame rate.
+ lastTick+=dt;
+ while(lastTick>=.25&&running){lastTick-=.25;step();}
+ if(explosion){explosion.age+=dt;if(explosion.age>.5)explosion=null;}
+ if(flash>0)flash=Math.max(0,flash-dt);
+ updateUI();draw();
+ if(running)raf=requestAnimationFrame(loop);
+}
+function draw(){
+ ctx.clearRect(0,0,SIZE,SIZE);
+ ctx.fillStyle='#0c1525';ctx.fillRect(0,0,SIZE,SIZE);
+ // Grid
+ for(let y=0;y<N;y++)for(let x=0;x<N;x++){
+  ctx.fillStyle=(x+y)%2?'#101d30':'#122137';
+  ctx.fillRect(x*CELL,y*CELL,CELL,CELL);
+  ctx.strokeStyle='#263b55';ctx.lineWidth=1;
+  ctx.strokeRect(x*CELL,y*CELL,CELL,CELL);
+ }
+ // Direction tiles
+ tiles.forEach((t,i)=>{
+  const x=t.x*CELL,y=t.y*CELL;
+  ctx.fillStyle=i===selected?'#07506a':'#173a50';
+  ctx.fillRect(x+9,y+9,CELL-18,CELL-18);
+  ctx.strokeStyle=i===selected?'#60eaff':'#377e9d';
+  ctx.lineWidth=i===selected?4:2;
+  ctx.strokeRect(x+12,y+12,CELL-24,CELL-24);
+  ctx.fillStyle='#b8f5ff';ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.font='bold 42px system-ui';
+  ctx.fillText(dirs[t.dir].icon,x+CELL/2,y+CELL/2);
+  ctx.font='12px system-ui';ctx.fillStyle='#82bad0';
+  ctx.fillText('MOVE '+(i+1),x+CELL/2,y+CELL-24);
+ });
+ // Coin
+ if(coin){
+  const cx=coin.x*CELL+CELL/2,cy=coin.y*CELL+CELL/2;
+  ctx.save();ctx.shadowColor='#ffce42';ctx.shadowBlur=22;
+  ctx.fillStyle='#ffce42';ctx.beginPath();ctx.arc(cx,cy,23,0,Math.PI*2);ctx.fill();
+  ctx.shadowBlur=0;ctx.strokeStyle='#fff0a0';ctx.lineWidth=4;
+  ctx.beginPath();ctx.arc(cx,cy,16,0,Math.PI*2);ctx.stroke();
+  ctx.fillStyle='#96600b';ctx.font='bold 24px system-ui';
+  ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('$',cx,cy+1);
+  ctx.restore();
+ }
+ // Missiles
+ missiles.forEach(m=>{
+  const cx=m.x*CELL+CELL/2,cy=m.y*CELL+CELL/2;
+  ctx.save();ctx.translate(cx,cy);
+  if(m.dx===0)ctx.rotate(Math.PI/2);
+  ctx.shadowColor='#ff435d';ctx.shadowBlur=18;
+  ctx.fillStyle='#ff405b';ctx.beginPath();
+  ctx.moveTo(-28,-10);ctx.lineTo(13,-10);ctx.lineTo(28,0);
+  ctx.lineTo(13,10);ctx.lineTo(-28,10);ctx.closePath();ctx.fill();
+  ctx.fillStyle='#ffb3bd';ctx.fillRect(-23,-4,17,8);
+  ctx.restore();
+ });
+ // Character
+ if(player){
+  const cx=player.x*CELL+CELL/2,cy=player.y*CELL+CELL/2;
+  ctx.save();ctx.shadowColor='#61eaff';ctx.shadowBlur=20;
+  ctx.fillStyle=player.stopped?'#8291a7':'#60eaff';
+  ctx.beginPath();ctx.arc(cx,cy,24,0,Math.PI*2);ctx.fill();
+  ctx.shadowBlur=0;ctx.fillStyle='#102239';
+  ctx.beginPath();ctx.arc(cx,cy,10,0,Math.PI*2);ctx.fill();
+  const d=dirs[player.dir];
+  ctx.strokeStyle='#efffff';ctx.lineWidth=5;ctx.lineCap='round';
+  ctx.beginPath();ctx.moveTo(cx-d.x*5,cy-d.y*5);
+  ctx.lineTo(cx+d.x*17,cy+d.y*17);ctx.stroke();
+  ctx.restore();
+ }
+ if(explosion){
+  const p=explosion,r=20+p.age*95;
+  ctx.save();ctx.globalAlpha=Math.max(0,1-p.age*2);
+  ctx.strokeStyle='#ffb33b';ctx.lineWidth=9;
+  ctx.beginPath();ctx.arc(p.x*CELL+50,p.y*CELL+50,r,0,Math.PI*2);ctx.stroke();
+  ctx.fillStyle='#ff4c35';ctx.beginPath();
+  ctx.arc(p.x*CELL+50,p.y*CELL+50,r*.45,0,Math.PI*2);ctx.fill();
+  ctx.restore();
+ }
+ if(flash>0){
+  ctx.fillStyle='rgba(255,55,75,'+(flash*.25)+')';
+  ctx.fillRect(0,0,SIZE,SIZE);
+ }
+}
+canvas.addEventListener('pointerdown',e=>{
+ if(!running)return;
+ const r=canvas.getBoundingClientRect();
+ const p={x:Math.floor((e.clientX-r.left)/r.width*N),
+ y:Math.floor((e.clientY-r.top)/r.height*N)};
+ const index=tiles.findIndex(t=>same(t,p));
+ if(index>=0){selected=index;updateUI();draw();return;}
+ moveTile(selected,p);
+});
+document.querySelectorAll('[data-dir]').forEach(b=>
+ b.addEventListener('click',()=>{
+  selected=Number(b.dataset.dir);updateUI();draw();
+  $('toast').textContent=dirs[tiles[selected].dir].name+'方向マスを選択中';
+ }));
+document.addEventListener('keydown',e=>{
+ if(!running)return;
+ const map={ArrowUp:[0,-1],w:[0,-1],ArrowRight:[1,0],d:[1,0],
+ ArrowDown:[0,1],s:[0,1],ArrowLeft:[-1,0],a:[-1,0]};
+ const v=map[e.key];
+ if(v){e.preventDefault();repositionTileByKey(v[0],v[1]);}
+ if(e.key>='1'&&e.key<='4'){selected=Number(e.key)-1;updateUI();draw();}
+});
+$('start').addEventListener('click',()=>{
+ if(ended)reset();
+ start();
+});
+$('restart').addEventListener('click',()=>{reset();start();});
+$('sound').addEventListener('click',()=>{audioOn=!audioOn;updateUI();});
+reset();
+})();
+</script>
+</body>
+</html>
